@@ -1,0 +1,37 @@
+{
+  "name": "nodeserver",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1",
+    "bcrypt": "^6.0.0",
+    "cookie-session": "^2.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "drizzle-orm": "^0.44.3",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.16.4",
+    "nodemailer": "^7.0.5",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/nodemailer": "^6.4.17",
+    "drizzle-kit": "^0.31.4",
+    "tsx": "^4.20.3"
+  }
+}
