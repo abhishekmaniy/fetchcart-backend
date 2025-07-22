@@ -5,7 +5,18 @@ import { Request, Response } from 'express'
 import db from '../db/db'
 import { tokenTable, usersTable } from '../db/schema'
 import { sendEmail } from '../utils/sendEmail'
+import jwt from 'jsonwebtoken'
 
+const SECRET = process.env.SECRET!
+
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict' as const,
+  maxAge: 3 * 24 * 60 * 60 * 1000 // 3 days in ms
+}
+
+// ✅ CREATE USER
 const createUser = async (req: Request, res: Response) => {
   try {
     const { type, user } = req.body
@@ -21,15 +32,19 @@ const createUser = async (req: Request, res: Response) => {
       .where(eq(usersTable.email, email))
 
     if (existingUsers.length > 0) {
+      const { password: pass, ...safeUser } = existingUsers[0]
+      const accessToken = jwt.sign({ user: safeUser }, SECRET, {
+        expiresIn: '3d'
+      })
+      res.cookie('accessToken', accessToken, COOKIE_OPTIONS)
       return res.status(200).json({
         message: 'User already exists',
-        user: existingUsers[0],
+        user: safeUser,
         verified: existingUsers[0].verified
       })
     }
 
     const isGoogleSignup = type === 'google'
-
     const hashedPassword =
       !isGoogleSignup && password ? await bcrypt.hash(password, 10) : null
 
@@ -45,11 +60,18 @@ const createUser = async (req: Request, res: Response) => {
       .returning()
 
     const userData = insertedUser[0]
+    const { password: _, ...safeUser } = userData
+
+    const accessToken = jwt.sign({ user: safeUser }, SECRET, {
+      expiresIn: '3d'
+    })
+
+    res.cookie('accessToken', accessToken, COOKIE_OPTIONS)
 
     if (isGoogleSignup) {
       return res.status(201).json({
         message: 'User created with Google login.',
-        user: userData
+        user: safeUser
       })
     }
 
@@ -83,6 +105,7 @@ const createUser = async (req: Request, res: Response) => {
   }
 }
 
+// ✅ VERIFY USER
 const verifyUser = async (req: Request, res: Response) => {
   try {
     const { userId, token: tokenValue } = req.params
@@ -93,7 +116,6 @@ const verifyUser = async (req: Request, res: Response) => {
       .where(eq(usersTable.id, userId))
 
     const user = users[0]
-
     if (!user) {
       return res.status(400).json({ message: 'Invalid Link - User not found' })
     }
@@ -106,7 +128,6 @@ const verifyUser = async (req: Request, res: Response) => {
       )
 
     const token = tokens[0]
-
     if (!token) {
       return res.status(400).json({ message: 'Invalid Link - Token not found' })
     }
@@ -118,48 +139,93 @@ const verifyUser = async (req: Request, res: Response) => {
 
     await db.delete(tokenTable).where(eq(tokenTable.token, tokenValue))
 
-    return res.status(200).json({ message: 'Email verified successfully' })
+    const { password, ...safeUser } = user
+    const accessToken = jwt.sign({ user: safeUser }, SECRET, {
+      expiresIn: '3d'
+    })
+
+    res.cookie('accessToken', accessToken, COOKIE_OPTIONS)
+
+    return res.status(200).json({
+      message: 'Email verified successfully',
+      user: safeUser
+    })
   } catch (error) {
     console.error(error)
     return res.status(500).json({ message: 'Internal Server Error' })
   }
 }
 
+// ✅ LOGIN USER
 const loginUser = async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body
+    const { type, user } = req.body
+    const { email, password } = user
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' })
+    }
 
     const existingUsers = await db
       .select()
       .from(usersTable)
       .where(eq(usersTable.email, email))
 
-    const user = existingUsers[0]
-
-    if (!user) {
-      return res.status(400).json({ message: 'Invalid email or password' })
+    const dbUser = existingUsers[0]
+    if (!dbUser) {
+      return res
+        .status(400)
+        .json({ message: 'Invalid email or user not found' })
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password || '')
+    const isGoogleLogin = type === 'google'
+    const isManualLogin = type === 'manual'
 
-    if (!isPasswordValid) {
-      return res.status(400).json({ message: 'Invalid email or password' })
+    // Prevent manual login if account was created with Google (no password)
+    if (isManualLogin && !dbUser.password) {
+      return res.status(403).json({
+        message:
+          'You must sign in using Google. This account is linked to Google login only.'
+      })
     }
 
-    if (!user.verified) {
-      await db.delete(tokenTable).where(eq(tokenTable.userId, String(user.id)))
+    // Handle manual login
+    if (isManualLogin) {
+      const isPasswordValid = await bcrypt.compare(
+        password,
+        dbUser.password || ''
+      )
+      if (!isPasswordValid) {
+        return res.status(400).json({ message: 'Invalid email or password' })
+      }
+    }
+
+    // Handle Google login verification (skip password)
+    if (isGoogleLogin) {
+      if (!dbUser.verified) {
+        await db
+          .update(usersTable)
+          .set({ verified: true })
+          .where(eq(usersTable.id, dbUser.id))
+      }
+    }
+
+    // If email not verified for manual login
+    if (!dbUser.verified && isManualLogin) {
+      await db
+        .delete(tokenTable)
+        .where(eq(tokenTable.userId, String(dbUser.id)))
 
       const rawToken = crypto.randomBytes(32).toString('hex')
-
       await db.insert(tokenTable).values({
-        userId: String(user.id),
+        userId: String(dbUser.id),
         token: rawToken
       })
 
-      const url = `${process.env.BASE_URL}/user/${user.id}/verify/${rawToken}`
+      const url = `${process.env.BASE_URL}/user/${dbUser.id}/verify/${rawToken}`
 
       await sendEmail({
-        email: user.email,
+        email: dbUser.email,
         subject: 'Verify Email',
         text: url
       })
@@ -169,24 +235,27 @@ const loginUser = async (req: Request, res: Response) => {
       })
     }
 
-    // ✅ Authenticated & verified — issue auth token (example with JWT)
-    // const authToken = jwt.sign({ id: user.id }, process.env.JWT_SECRET!, {
-    //   expiresIn: '1d'
-    // })
+    const { password: _, ...safeUser } = dbUser
 
-    // You can return token or session info here
+    const accessToken = jwt.sign({ user: safeUser }, SECRET, {
+      expiresIn: '3d'
+    })
+
+    res.cookie('accessToken', accessToken, COOKIE_OPTIONS)
+
     return res.status(200).json({
       message: 'Login successful',
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email
-      }
-      // token: authToken
+      user: safeUser
     })
   } catch (error) {
     console.error(error)
     return res.status(500).json({ message: 'Internal Server Error' })
   }
 }
-export { createUser, loginUser, verifyUser }
+
+const logoutUser = (req: Request, res: Response) => {
+  res.clearCookie('accessToken', COOKIE_OPTIONS)
+  return res.status(200).json({ message: 'Logged out successfully' })
+}
+
+export { createUser, verifyUser, loginUser, logoutUser }
