@@ -16,9 +16,20 @@ const PORT = process.env.PORT || 5000
 // Middleware
 app.use(cookieParser())
 app.use(express.json())
+const allowedOrigins = [
+  'http://localhost:8080',
+  'https://fetchcart-ai-find.vercel.app'
+]
+
 app.use(
   cors({
-    origin: 'http://localhost:8080',
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true)
+      } else {
+        callback(new Error('Not allowed by CORS'))
+      }
+    },
     credentials: true
   })
 )
@@ -26,7 +37,7 @@ app.use(
 // Public routes (accessible without token)
 app.use('/user', userRoute)
 app.use('/auth', authRoute)
-app.use('/compare' , compareRoute)
+app.use('/compare', compareRoute)
 
 // 🔒 Secure all routes defined after this point
 app.use(verifyToken)

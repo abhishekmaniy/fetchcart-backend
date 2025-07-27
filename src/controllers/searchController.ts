@@ -77,6 +77,7 @@ const search = async (req: Request, res: Response) => {
     }
 
     let searchQuery = `${query} product`
+
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
         if (key === 'budget' && typeof value === 'number') {
@@ -99,15 +100,12 @@ const search = async (req: Request, res: Response) => {
       }
     })
 
-    console.log(serpApiRes)
-
     const shoppingResults = serpApiRes.data.shopping_results?.slice(0, 25) || []
 
     if (!shoppingResults.length) {
       return res.status(404).json({ error: 'No shopping results found' })
     }
 
-    // 🤖 Use Gemini to structure output
     const prompt = `
 You are a product structuring assistant. Convert the following shopping_results array into a JSON array of product objects matching this schema:
 
@@ -130,9 +128,9 @@ You are a product structuring assistant. Convert the following shopping_results 
 
 Here is the shopping_results array:
 ${JSON.stringify(shoppingResults, null, 2)}
-    `
+`
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) // ✅ fix model
     const result = await model.generateContent(prompt)
     const text = result.response.text().trim()
 
@@ -152,11 +150,13 @@ ${JSON.stringify(shoppingResults, null, 2)}
 
     // 📥 Save search and products
     const searchId = uuidv4()
+    const createdAt = new Date()
 
     await db.insert(searchesTable).values({
       id: searchId,
       userId,
-      query: searchQuery
+      query: searchQuery,
+      createdAt
     })
 
     const productInsertValues = structuredProducts.map(product => ({
@@ -178,25 +178,21 @@ ${JSON.stringify(shoppingResults, null, 2)}
 
     await db.insert(productsTable).values(productInsertValues)
 
-    return res.json({ products: structuredProducts })
+    // ✅ Return both search and products in a single object
+    return res.json({
+      search: {
+        id: searchId,
+        query: searchQuery,
+        createdAt: createdAt.toISOString()
+      },
+      products: structuredProducts
+    })
   } catch (err: any) {
     console.error('Search error:', err.message)
     return res.status(500).json({ error: 'Product search failed' })
   }
 }
 
-function extractStoreName (url?: string) {
-  if (!url) return 'Unknown'
-  try {
-    const hostname = new URL(url).hostname
-    if (hostname.includes('amazon')) return 'Amazon'
-    if (hostname.includes('bestbuy')) return 'Best Buy'
-    if (hostname.includes('apple')) return 'Apple Store'
-    return hostname.replace('www.', '').split('.')[0]
-  } catch {
-    return 'Unknown'
-  }
-}
 
 const generateForm = async (req: Request, res: Response) => {
   try {
