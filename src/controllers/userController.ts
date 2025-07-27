@@ -6,14 +6,18 @@ import db from '../db/db'
 import { tokenTable, usersTable } from '../db/schema'
 import { sendEmail } from '../utils/sendEmail'
 import jwt from 'jsonwebtoken'
+import type { CookieOptions } from 'express'
 
 const SECRET = process.env.SECRET!
 
-const COOKIE_OPTIONS = {
+const isProduction = process.env.NODE_ENV === 'production'
+
+const COOKIE_OPTIONS: CookieOptions = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict' as const,
-  maxAge: 3 * 24 * 60 * 60 * 1000 // 3 days in ms
+  secure: isProduction, // 🔒 Only secure on HTTPS (production)
+  sameSite: isProduction ? 'none' : 'lax', // 🔄 Cross-origin support in prod
+  maxAge: 1000 * 60 * 60 * 24 * 3, // 3 days
+  path: '/'
 }
 
 // ✅ CREATE USER
