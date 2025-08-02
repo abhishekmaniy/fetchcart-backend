@@ -4,68 +4,9 @@ import { Request, Response } from 'express'
 import { v4 as uuidv4 } from 'uuid'
 import db from '../db/db'
 import { productsTable, searchesTable } from '../db/schema'
-import fs from 'fs/promises'
-import path from 'path'
 
-const BATCH_SIZE = 8
-const MAX_RETRIES = 3
+
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!)
-
-function createPrompt (rawItems: any[], previousAttempts: any[] = []) {
-  return `
-You are a strict JSON formatter. Return only a valid JSON array and nothing else.
-
-Format:
-[
-  {
-    "name": "string",
-    "price": "string (starts with $)",
-    "originalPrice": "string (starts with $ or null)",
-    "savings": "string (starts with $ or null)",
-    "image": "valid image URL",
-    "rating": number or null,
-    "reviews": number or null,
-    "store": "string or null",
-    "link": "valid URL"
-  }
-]
-
-Here is the raw data:
-${JSON.stringify(rawItems, null, 2)}
-
-Previously generated attempts:
-${JSON.stringify(previousAttempts, null, 2)}
-
-Return a valid JSON array only.`
-}
-
-async function extractValidJson (model: any, rawItems: any[]): Promise<any[]> {
-  let attempts = 0
-  let previousAttempts: string[] = []
-
-  while (attempts < MAX_RETRIES) {
-    try {
-      const prompt = createPrompt(rawItems, previousAttempts)
-      const raw = (await (await model.generateContent(prompt)).response).text()
-      const cleanedRaw = raw.replace(/```json|```/g, '').trim()
-
-      const start = cleanedRaw.indexOf('[')
-      const end = cleanedRaw.lastIndexOf(']')
-      if (start === -1 || end === -1) throw new Error('No JSON array found')
-
-      const parsed = JSON.parse(cleanedRaw.slice(start, end + 1))
-      if (!Array.isArray(parsed)) throw new Error('Not an array')
-
-      return parsed
-    } catch (err: any) {
-      console.warn(`⚠️ Attempt ${attempts + 1} failed: ${err.message}`)
-      previousAttempts.push(err.message)
-      attempts++
-    }
-  }
-
-  throw new Error('AI returned invalid JSON format after retries')
-}
 
 const search = async (req: Request, res: Response) => {
   try {
@@ -130,7 +71,7 @@ Here is the shopping_results array:
 ${JSON.stringify(shoppingResults, null, 2)}
 `
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) // ✅ fix model
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
     const result = await model.generateContent(prompt)
     const text = result.response.text().trim()
 
@@ -178,20 +119,21 @@ ${JSON.stringify(shoppingResults, null, 2)}
 
     await db.insert(productsTable).values(productInsertValues)
 
-    // ✅ Return both search and products in a single object
+    // ✅ Embed products directly into the search object
     return res.json({
       search: {
         id: searchId,
         query: searchQuery,
-        createdAt: createdAt.toISOString()
-      },
-      products: structuredProducts
+        createdAt: createdAt.toISOString(),
+        products: structuredProducts
+      }
     })
   } catch (err: any) {
     console.error('Search error:', err.message)
     return res.status(500).json({ error: 'Product search failed' })
   }
 }
+
 
 
 const generateForm = async (req: Request, res: Response) => {
@@ -232,7 +174,6 @@ Output only the pure JSON array. No explanation or formatting.
     const response = await result.response
     const raw = response.text()
 
-    // Parse the JSON (safely)
     const start = raw.indexOf('[')
     const end = raw.lastIndexOf(']')
     const jsonString = raw.substring(start, end + 1)
@@ -251,4 +192,5 @@ Output only the pure JSON array. No explanation or formatting.
   }
 }
 
-export { search, generateForm }
+export { generateForm, search }
+
