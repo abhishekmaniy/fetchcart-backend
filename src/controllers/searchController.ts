@@ -4,7 +4,8 @@ import { Request, Response } from 'express'
 import { v4 as uuidv4 } from 'uuid'
 import db from '../db/db'
 import { productsTable, searchesTable } from '../db/schema'
-
+import fs from 'fs';
+import path from "path"
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!)
 
@@ -41,6 +42,16 @@ const search = async (req: Request, res: Response) => {
       }
     })
 
+    const data = serpApiRes.data;
+
+    // Define the file path
+    const filePath = path.join(__dirname, 'serpapi-response.json');
+
+    // Write the data to a JSON file
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+
+    console.log('Saved SERP API response to:', filePath);
+
     const shoppingResults = serpApiRes.data.shopping_results?.slice(0, 25) || []
 
     if (!shoppingResults.length) {
@@ -71,7 +82,7 @@ Here is the shopping_results array:
 ${JSON.stringify(shoppingResults, null, 2)}
 `
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
     const result = await model.generateContent(prompt)
     const text = result.response.text().trim()
 

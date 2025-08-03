@@ -1,71 +1,101 @@
-import { eq, sql } from 'drizzle-orm'
-import db from '../db/db'
-import { usersTable, searchesTable, productsTable } from '../db/schema'
+import { eq, sql, inArray } from 'drizzle-orm';
+import db from '../db/db';
+import {
+  usersTable,
+  searchesTable,
+  productsTable,
+  compareTable,
+  compareProductsTable
+} from '../db/schema';
 
 export const getUserNestedData = async (userId: string) => {
   // Step 1: Fetch the user
   const [user] = await db
     .select()
     .from(usersTable)
-    .where(eq(usersTable.id, userId))
-  console.log(user)
+    .where(eq(usersTable.id, userId));
 
-  if (!user) throw new Error('User not found')
+  if (!user) throw new Error('User not found');
 
-  // Step 2: Fetch searches for this user
+  // -----------------------------
+  // SEARCHES -> PRODUCTS
+  // -----------------------------
   const searches = await db
     .select()
     .from(searchesTable)
-    .where(eq(searchesTable.userId, user.id))
+    .where(eq(searchesTable.userId, user.id));
 
-  console.log("searches" , searches)
+  const searchIds = searches.map((s) => s.id);
+  const productsFromSearches = searchIds.length
+    ? await db
+        .select()
+        .from(productsTable)
+        .where(inArray(productsTable.searchId, searchIds))
+    : [];
 
-  const searchIds = searches.map(search => search.id)
-  if (searchIds.length === 0) {
-    return {
-      user: {
-        ...user,
-        searches: []
-      }
-    }
+  const searchProductMap: Record<string, typeof productsFromSearches[0][]> = {};
+  for (const p of productsFromSearches) {
+    const sid = p.searchId;
+    if (!sid) continue;
+    if (!searchProductMap[sid]) searchProductMap[sid] = [];
+    searchProductMap[sid].push(p);
   }
 
-  // Step 3: Fetch all products linked to those searches
-  const products = await db
+  const nestedSearches = searches.map((s) => ({
+    ...s,
+    products: searchProductMap[s.id] || []
+  }));
+
+  // -----------------------------
+  // COMPARISONS -> PRODUCTS
+  // -----------------------------
+  const comparisons = await db
     .select()
-    .from(productsTable)
-    .where(
-      sql`${productsTable.searchId} IN (${sql.join(
-        searchIds.map(id => sql`${id}`),
-        sql`,`
-      )})`
-    )
+    .from(compareTable)
+    .where(eq(compareTable.userId, user.id));
 
-  console.log("products" , products)
+  const comparisonIds = comparisons.map((c) => c.id);
 
-  // Step 4: Group products by searchId
-  const productMap: Record<string, typeof products[0][]> = {}
-  for (const product of products) {
-    if (!productMap[product.searchId]) {
-      productMap[product.searchId] = []
-    }
-    productMap[product.searchId].push(product)
+  const compareProductLinks = comparisonIds.length
+    ? await db
+        .select()
+        .from(compareProductsTable)
+        .where(inArray(compareProductsTable.compareId, comparisonIds))
+    : [];
+
+  const allProductIds = compareProductLinks.map((cp) => cp.productId);
+  const productsFromComparisons = allProductIds.length
+    ? await db
+        .select()
+        .from(productsTable)
+        .where(inArray(productsTable.id, allProductIds))
+    : [];
+
+  // Group products by compareId using compareProductsTable
+  const compareProductMap: Record<string, typeof productsFromComparisons[0][]> = {};
+  for (const cp of compareProductLinks) {
+    const compareId = cp.compareId;
+    const product = productsFromComparisons.find((p) => p.id === cp.productId);
+    if (!product) continue;
+    if (!compareProductMap[compareId]) compareProductMap[compareId] = [];
+    compareProductMap[compareId].push(product);
   }
 
-  console.log("productMap" , productMap)
+  const nestedComparisons = comparisons.map((c) => ({
+    ...c,
+    products: compareProductMap[c.id] || []
+  }));
 
-  // Step 5: Build nested structure
-  const nestedSearches = searches.map(search => ({
-    ...search,
-    products: productMap[search.id] || []
-  }))
+  console.log(nestedComparisons)
 
-  console.log("nestedSearches" , nestedSearches)
-
+  // -----------------------------
+  // FINAL STRUCTURE
+  // -----------------------------
   return {
     user: {
       ...user,
-      searches: nestedSearches
+      searches: nestedSearches,
+      comparisons: nestedComparisons
     }
-  }
-}
+  };
+};
