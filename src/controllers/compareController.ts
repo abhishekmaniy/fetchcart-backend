@@ -116,10 +116,10 @@ export const scrapeProductPage = async (req: Request, res: Response) => {
     if (!isValidURL(url)) continue
 
     try {
-      const encodedUrl = encodeURIComponent(url);
+      const encodedUrl = encodeURIComponent(url); 
 
       const scrapeRes = await axios.get(
-        `https://api.scraperapi.com/?api_key=${SCRAPER_API}&url=${encodedUrl}&output_format=json&autoparse=true&country_code=in&device_type=desktop`
+        `https://api.scraperapi.com/structured/google/shopping?api_key=${SCRAPER_API}&url=${encodedUrl}&output_format=json&autoparse=true&country_code=in&device_type=desktop`
       );
 
       const scrapedProduct = scrapeRes.data
