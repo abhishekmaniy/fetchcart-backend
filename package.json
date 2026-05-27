@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "FetchCart AI Product Search Backend",
   "main": "dist/index.js",
-  "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:worker:search": "tsx watch src/workers/product-search.worker.ts",
