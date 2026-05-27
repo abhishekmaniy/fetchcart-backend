@@ -1,30 +1,75 @@
-import { Request, Response, NextFunction } from 'express'
+import { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
+import type { JwtPayload } from 'jsonwebtoken'
+import { env } from '../config/env'
+
+type AccessTokenPayload = JwtPayload & {
+  userId: string
+  email: string
+}
+
+
+if (!env.ACCESS_TOKEN_SECRET) {
+  throw new Error('ACCESS_TOKEN_SECRET is missing in environment variables')
+}
+
+const getBearerToken = (req: Request) => {
+  const authHeader = req.headers.authorization
+
+  if (!authHeader) {
+    return null
+  }
+
+  const [scheme, token] = authHeader.split(' ')
+
+  if (scheme !== 'Bearer' || !token) {
+    return null
+  }
+
+  return token
+}
 
 export const verifyToken = (
   req: Request,
   res: Response,
   next: NextFunction
 ) => {
-  const token = req.cookies?.accessToken
+  const token = getBearerToken(req)
 
   if (!token) {
-    console.log('No token found in cookies')
-    return res.status(401).json({ message: 'Unauthorized: No token provided' })
+    return res.status(401).json({
+      message: 'Unauthorized. Access token is missing.',
+      code: 'ACCESS_TOKEN_MISSING',
+    })
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.SECRET!)
-    console.log('Verified Token:', decoded)
+    const decoded = jwt.verify(token, env.ACCESS_TOKEN_SECRET) as AccessTokenPayload
 
-    // Optionally attach to req.user
-    req.user = (decoded as any).user
+    if (!decoded.userId) {
+      return res.status(401).json({
+        message: 'Unauthorized. Invalid access token payload.',
+        code: 'INVALID_ACCESS_TOKEN_PAYLOAD',
+      })
+    }
 
-    next()
-  } catch (err) {
-    console.log('JWT verification failed:', err)
-    return res
-      .status(401)
-      .json({ message: 'Unauthorized: Invalid or expired token' })
+    req.user = {
+      id: decoded.userId,
+      email: decoded.email,
+    }
+
+    return next()
+  } catch (err: unknown) {
+    if (err instanceof jwt.TokenExpiredError) {
+      return res.status(401).json({
+        message: 'Access token expired. Please refresh your session.',
+        code: 'ACCESS_TOKEN_EXPIRED',
+      })
+    }
+
+    return res.status(401).json({
+      message: 'Unauthorized. Token verification failed.',
+      code: 'TOKEN_VERIFICATION_FAILED',
+    })
   }
 }

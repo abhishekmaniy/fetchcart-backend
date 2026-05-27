@@ -1,11 +1,10 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from "jsonwebtoken"
-const SECRET = process.env.SECRET
-
+import { env } from '../config/env';
 declare global {
   namespace Express {
     interface Request {
-      user?: any;
+      user?: { id: string; email?: string };
     }
   }
 }
@@ -13,13 +12,13 @@ declare global {
 export const verify = (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization
   if (authHeader) {
-    const token = authHeader.split('')[1]
+    const token = authHeader.split(' ')[1]
 
-    jwt.verify(token, SECRET!, (err, user) => {
+    jwt.verify(token, env.JWT_SECRET!, (err, user) => {
       if (err) {
-        return res.status(403).json('TOken is not valid')
+        return res.status(403).json('Token is not valid')
       }
-      req.user = user
+      req.user = user as { id: string; email?: string }
       next()
     })
   } else {

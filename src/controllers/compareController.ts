@@ -1,199 +1,528 @@
-import { Request, Response } from 'express'
-import { randomUUID } from 'crypto'
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import axios from 'axios'
-import * as dotenv from 'dotenv'
-import db from '../db/db'
-import { compareTable, productsTable, compareProductsTable } from '../db/schema'
-import { InferInsertModel } from 'drizzle-orm'
+import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { Request, Response } from "express";
+import { v4 as uuidv4 } from "uuid";
 
-dotenv.config()
+import db from "../config/db";
+import {
+  compareProductsTable,
+  compareTable,
+  productsTable,
+  searchesTable,
+} from "../db/schema";
+import { productCompareQueue } from "../queues/compare.queue";
 
-type ProductInsert = InferInsertModel<typeof productsTable>
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!)
-const SCRAPER_API = process.env.SCRAPER_API!
+type CompareSource = "EXISTING_PRODUCTS" | "PRODUCT_URLS";
+type CompareHistoryFilter = "all" | "recent" | "favorites";
 
-function isValidURL(input: string): boolean {
+function isValidUrl(value: string) {
   try {
-    new URL(input)
-    return true
+    new URL(value);
+    return true;
   } catch {
-    return false
+    return false;
   }
 }
 
-async function sendToGemini(prompt: string) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
-  const result = await model.generateContent(prompt)
-  let text = result.response.text().trim()
+function normalizeProductUrls(productUrls: unknown) {
+  if (!Array.isArray(productUrls)) return [];
 
-  if (text.startsWith('```')) {
-    text = text.replace(/^```json\s*|```$/g, '').trim()
+  return productUrls
+    .filter((url): url is string => typeof url === "string")
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .filter(isValidUrl);
+}
+
+function normalizeProductIds(productIds: unknown) {
+  if (!Array.isArray(productIds)) return [];
+
+  return productIds
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+function buildFallbackCompareTitle({
+  source,
+  productCount,
+}: {
+  source: CompareSource;
+  productCount: number;
+}) {
+  if (source === "EXISTING_PRODUCTS") {
+    return `${productCount} selected products comparison`;
   }
 
+  return `${productCount} product URLs comparison`;
+}
+
+function buildInitialInsights({
+  source,
+  totalProducts,
+}: {
+  source: CompareSource;
+  totalProducts: number;
+}) {
+  return {
+    source,
+    status: "QUEUED",
+    totalProducts,
+    processedProducts: 0,
+    failedProducts: 0,
+    errorMessage: null,
+    isFavorite: false,
+    completedAt: null,
+  };
+}
+
+function getInsightsValue(insights: unknown) {
+  if (!insights || typeof insights !== "object" || Array.isArray(insights)) {
+    return {};
+  }
+
+  return insights as Record<string, any>;
+}
+
+export const createCompareJob = async (req: Request, res: Response) => {
   try {
-    return JSON.parse(text)
-  } catch (err) {
-    console.error('Gemini Output:', text)
-    throw new Error('Invalid JSON from Gemini')
-  }
-}
+    const { source, productIds, productUrls } = req.body;
+    const userId = req.user?.id;
 
-function buildComparisonPrompt(products: any[]) {
-  const productList = products
-    .map((product, index) => `${index + 1}. ${JSON.stringify(product, null, 2)}`)
-    .join('\n\n')
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+      });
+    }
 
-  return `
-You are a product analyst.
+    if (source !== "EXISTING_PRODUCTS" && source !== "PRODUCT_URLS") {
+      return res.status(400).json({
+        error: "Invalid comparison source",
+      });
+    }
 
-Your task is to compare multiple products and return a structured JSON object in the following format:
+    const compareId = uuidv4();
+    const createdAt = new Date();
 
-{
-  "bestProductIndex": number, // Index (1-based) of the best product
-  "bestProductTitle": string,
-  "reasons": string[], // Reasons why it's the best
-  "summary": string // A brief summary of the comparison
-}
+    if (source === "EXISTING_PRODUCTS") {
+      const validProductIds = normalizeProductIds(productIds);
 
-Compare the following product objects:
+      if (validProductIds.length < 2) {
+        return res.status(400).json({
+          error: "At least 2 products are required for comparison",
+        });
+      }
 
-${productList}
-  `.trim()
-}
+      if (validProductIds.length > 4) {
+        return res.status(400).json({
+          error: "You can compare maximum 4 products",
+        });
+      }
 
-function buildTransformPromptForOne(product: any) {
-  return `
-You are a data formatter. Convert the following product object into this structured format for PostgreSQL:
+      const ownedProducts = await db
+        .select({
+          id: productsTable.id,
+          productUrl: productsTable.productUrl,
+          productName: productsTable.productName,
+        })
+        .from(productsTable)
+        .innerJoin(searchesTable, eq(productsTable.searchId, searchesTable.id))
+        .where(
+          and(
+            inArray(productsTable.id, validProductIds),
+            eq(searchesTable.userId, userId),
+          ),
+        );
 
-{
-  "productName": string,
-  "brand": string,
-  "model": string,
+      if (ownedProducts.length !== validProductIds.length) {
+        return res.status(403).json({
+          error: "Some selected products are invalid or not accessible",
+        });
+      }
 
-  "price": string,
-  "originalPrice": string,
-  "savings": string,
+      const urls = ownedProducts
+        .map((product) => product.productUrl)
+        .filter((url): url is string => Boolean(url));
 
-  "image": string,
-  "images": string[],
+      const fallbackTitle = buildFallbackCompareTitle({
+        source,
+        productCount: ownedProducts.length,
+      });
 
-  "rating": number,
-  "reviews": number,
+      await db.insert(compareTable).values({
+        id: compareId,
+        userId,
+        title: fallbackTitle,
+        productUrl: urls,
+        summary: "Comparison is being generated...",
+        insights: buildInitialInsights({
+          source,
+          totalProducts: ownedProducts.length,
+        }),
+        createdAt,
+      });
 
-  "productUrl": string,
-  "store": string,
-  "asin": string,
-
-  "category": string,
-  "description": string,
-
-  "productInfo": { [key: string]: string },
-  "featureBullets": string[],
-
-  "pros": string[],
-  "cons": string[]
-}
-
-Strictly return only a single JSON object in the above format. Do **not** include any markdown, explanation, or extra text.
-
-Here is the raw product object:
-${JSON.stringify(product)}
-  `.trim();
-}
-
-export const scrapeProductPage = async (req: Request, res: Response) => {
-  const { queries, userId } = req.body
-
-  if (!queries || !Array.isArray(queries) || queries.length < 2) {
-    return res.status(400).json({ error: 'Need at least 2 product URLs' })
-  }
-
-  const rawProductData = []
-  const finalProductArray: ProductInsert[] = []
-
-  for (const url of queries.map((q: string) => q.trim())) {
-    if (!isValidURL(url)) continue
-
-    try {
-      const encodedUrl = encodeURIComponent(url);
-
-      const scrapeRes = await axios.get(
-        `https://api.scraperapi.com/?api_key=${SCRAPER_API}&url=${encodedUrl}&output_format=json&autoparse=true&device_type=desktop&country_code=in`
+      await db.insert(compareProductsTable).values(
+        ownedProducts.map((product) => ({
+          id: uuidv4(),
+          compareId,
+          productId: product.id,
+        })),
       );
 
-      const scrapedProduct = scrapeRes.data
-      scrapedProduct.productUrl = url
+      await productCompareQueue.add("product-compare", {
+        compareId,
+        userId,
+        source,
+        productIds: validProductIds,
+      });
 
-      // 🔁 Transform the scraped product into structured format
-      const prompt = buildTransformPromptForOne(scrapedProduct)
-
-      try {
-        const structured = await sendToGemini(prompt)
-        finalProductArray.push(structured)
-        rawProductData.push(structured) // use structured format for comparison
-      } catch (err: any) {
-        console.error("Failed to transform product:", url, err.message)
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 1000)) // throttle
-    } catch (err: any) {
-      console.error(`Error scraping ${url}:`, err?.message)
+      return res.status(202).json({
+        message: "Comparison job created successfully",
+        compare: {
+          id: compareId,
+          title: fallbackTitle,
+          source,
+          status: "QUEUED",
+          productIds: validProductIds,
+          createdAt: createdAt.toISOString(),
+        },
+      });
     }
-  }
 
-  if (finalProductArray.length < 2) {
-    return res.status(500).json({ error: 'Failed to extract at least 2 valid products' })
-  }
+    const validProductUrls = normalizeProductUrls(productUrls);
 
-  // 🔍 Generate comparison using structured product data
-  const comparisonPrompt = buildComparisonPrompt(rawProductData)
-  const comparison = await sendToGemini(comparisonPrompt)
+    if (validProductUrls.length < 2) {
+      return res.status(400).json({
+        error: "At least 2 valid product URLs are required for comparison",
+      });
+    }
 
-  // 💾 Insert into compareTable
-  const [compareEntry] = await db
-    .insert(compareTable)
-    .values({
-      id: randomUUID(),
+    if (validProductUrls.length > 4) {
+      return res.status(400).json({
+        error: "You can compare maximum 4 products",
+      });
+    }
+
+    const fallbackTitle = buildFallbackCompareTitle({
+      source,
+      productCount: validProductUrls.length,
+    });
+
+    await db.insert(compareTable).values({
+      id: compareId,
       userId,
-      title: `Comparison of ${finalProductArray.length} products`,
-      productUrl: finalProductArray
-        .map(p => p.productUrl)
-        .filter((url): url is string => typeof url === 'string'),
-      summary: comparison.summary,
-      insights: {
-        bestProductIndex: comparison.bestProductIndex,
-        bestProductTitle: comparison.bestProductTitle,
-        reasons: comparison.reasons,
-      }
-    })
-    .returning();
+      title: fallbackTitle,
+      productUrl: validProductUrls,
+      summary: "Comparison is being generated...",
+      insights: buildInitialInsights({
+        source,
+        totalProducts: validProductUrls.length,
+      }),
+      createdAt,
+    });
 
-  // 💾 Save structured products into productsTable
-  const insertedProducts = await db
-    .insert(productsTable)
-    .values(
-      finalProductArray.map(product => ({
-        id: randomUUID(),
-        compareId: compareEntry.id,
-        ...product
-      }))
-    )
-    .returning()
+    await productCompareQueue.add("product-compare", {
+      compareId,
+      userId,
+      source,
+      productUrls: validProductUrls,
+    });
 
-  // 🔗 Save into compareProductsTable
-  await db.insert(compareProductsTable).values(
-    insertedProducts.map(product => ({
-      id: randomUUID(),
-      compareId: compareEntry.id,
-      productId: product.id
-    }))
-  )
+    return res.status(202).json({
+      message: "Comparison job created successfully",
+      compare: {
+        id: compareId,
+        title: fallbackTitle,
+        source,
+        status: "QUEUED",
+        productUrls: validProductUrls,
+        createdAt: createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Create comparison job error:", error);
 
-  return res.json({
-    data: {
-      ...compareEntry,
-      products: insertedProducts
+    return res.status(500).json({
+      error: "Failed to create comparison job",
+    });
+  }
+};
+
+export const getCompareById = async (req: Request, res: Response) => {
+  try {
+    const { compareId } = req.params;
+    const userId = req.user?.id;
+
+    if (!compareId) {
+      return res.status(400).json({
+        error: "Missing compareId",
+      });
     }
-  })
-}
+
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+      });
+    }
+
+    const [compare] = await db
+      .select()
+      .from(compareTable)
+      .where(
+        and(eq(compareTable.id, compareId), eq(compareTable.userId, userId)),
+      );
+
+    if (!compare) {
+      return res.status(404).json({
+        error: "Comparison not found",
+      });
+    }
+
+    const products = await db
+      .select({
+        id: productsTable.id,
+        searchId: productsTable.searchId,
+        compareId: productsTable.compareId,
+        productName: productsTable.productName,
+        brand: productsTable.brand,
+        model: productsTable.model,
+        price: productsTable.price,
+        originalPrice: productsTable.originalPrice,
+        savings: productsTable.savings,
+        image: productsTable.image,
+        images: productsTable.images,
+        rating: productsTable.rating,
+        reviews: productsTable.reviews,
+        productUrl: productsTable.productUrl,
+        store: productsTable.store,
+        asin: productsTable.asin,
+        category: productsTable.category,
+        description: productsTable.description,
+        productInfo: productsTable.productInfo,
+        featureBullets: productsTable.featureBullets,
+        pros: productsTable.pros,
+        cons: productsTable.cons,
+        createdAt: productsTable.createdAt,
+      })
+      .from(compareProductsTable)
+      .innerJoin(
+        productsTable,
+        eq(compareProductsTable.productId, productsTable.id),
+      )
+      .where(eq(compareProductsTable.compareId, compareId));
+
+    return res.status(200).json({
+      compare: {
+        ...compare,
+        products,
+      },
+    });
+  } catch (error) {
+    console.error("Get comparison by ID error:", error);
+
+    return res.status(500).json({
+      error: "Failed to fetch comparison",
+    });
+  }
+};
+
+export const getCompareHistory = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized",
+      });
+    }
+
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 50);
+    const offset = (page - 1) * limit;
+
+    const filter = String(req.query.filter || "all") as CompareHistoryFilter;
+
+    const conditions = [eq(compareTable.userId, userId)];
+
+    if (filter === "recent") {
+      const last24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      conditions.push(gte(compareTable.createdAt, last24Hours));
+    }
+
+    if (filter === "favorites") {
+      conditions.push(sql`${compareTable.insights}->>'isFavorite' = 'true'`);
+    }
+
+    const whereCondition = and(...conditions);
+
+    const [totalResult] = await db
+      .select({
+        count: count(),
+      })
+      .from(compareTable)
+      .where(whereCondition);
+
+    const compares = await db
+      .select()
+      .from(compareTable)
+      .where(whereCondition)
+      .orderBy(desc(compareTable.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    const total = Number(totalResult?.count || 0);
+    const totalPages = Math.ceil(total / limit);
+
+    return res.status(200).json({
+      success: true,
+      filter,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+      compares: compares.map((compare) => {
+        const insights = getInsightsValue(compare.insights);
+
+        return {
+          ...compare,
+          status: insights.status || "UNKNOWN",
+          totalProducts:
+            insights.totalProducts || compare.productUrl?.length || 0,
+          processedProducts: insights.processedProducts || 0,
+          failedProducts: insights.failedProducts || 0,
+          errorMessage: insights.errorMessage || null,
+          isFavorite: Boolean(insights.isFavorite),
+          completedAt: insights.completedAt || null,
+        };
+      }),
+    });
+  } catch (error) {
+    console.error("Get comparison history error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch comparison history",
+    });
+  }
+};
+
+export const toggleCompareFavorite = async (req: Request, res: Response) => {
+  try {
+    const { compareId } = req.params;
+    const userId = req.user?.id;
+
+    if (!compareId) {
+      return res.status(400).json({
+        error: "Missing compareId",
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+      });
+    }
+
+    const [compare] = await db
+      .select()
+      .from(compareTable)
+      .where(
+        and(eq(compareTable.id, compareId), eq(compareTable.userId, userId)),
+      );
+
+    if (!compare) {
+      return res.status(404).json({
+        error: "Comparison not found",
+      });
+    }
+
+    const currentInsights = getInsightsValue(compare.insights);
+    const nextIsFavorite = !Boolean(currentInsights.isFavorite);
+
+    const nextInsights = {
+      ...currentInsights,
+      isFavorite: nextIsFavorite,
+    };
+
+    await db
+      .update(compareTable)
+      .set({
+        insights: nextInsights,
+      })
+      .where(
+        and(eq(compareTable.id, compareId), eq(compareTable.userId, userId)),
+      );
+
+    return res.status(200).json({
+      success: true,
+      compare: {
+        id: compareId,
+        isFavorite: nextIsFavorite,
+      },
+    });
+  } catch (error) {
+    console.error("Toggle comparison favorite error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to update comparison favorite",
+    });
+  }
+};
+
+export const deleteCompare = async (req: Request, res: Response) => {
+  try {
+    const { compareId } = req.params;
+    const userId = req.user?.id;
+
+    if (!compareId) {
+      return res.status(400).json({
+        error: "Missing compareId",
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+      });
+    }
+
+    const [compare] = await db
+      .select({
+        id: compareTable.id,
+      })
+      .from(compareTable)
+      .where(
+        and(eq(compareTable.id, compareId), eq(compareTable.userId, userId)),
+      );
+
+    if (!compare) {
+      return res.status(404).json({
+        error: "Comparison not found",
+      });
+    }
+
+    await db
+      .delete(compareTable)
+      .where(
+        and(eq(compareTable.id, compareId), eq(compareTable.userId, userId)),
+      );
+
+    return res.status(200).json({
+      success: true,
+      message: "Comparison deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete comparison error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to delete comparison",
+    });
+  }
+};

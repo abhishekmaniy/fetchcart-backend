@@ -1,5 +1,5 @@
 import { eq, sql, inArray } from 'drizzle-orm';
-import db from '../db/db';
+import db from '../config/db';
 import {
   usersTable,
   searchesTable,

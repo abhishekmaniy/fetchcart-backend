@@ -1,16 +1,24 @@
 import { Router } from 'express'
 import {
-  createUser,
+  forgotPassword,
+  getCurrentUser,
   loginUser,
-  verifyUser,
-  logoutUser
+  registerUser,
+  resetPassword,
+  verifyEmail,
 } from '../controllers/userController'
+import { verifyToken } from '../utils/verifyToken'
 
 const router = Router()
 
-router.post('/create', createUser)
+router.post('/register', registerUser)
 router.post('/login', loginUser)
-router.post('/logout', logoutUser)
-router.get('/:userId/verify/:token', verifyUser)
+router.post('/refresh', loginUser)
+router.get("/verify-email/:token", verifyEmail);
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password/:token", resetPassword);
+
+router.get("/me", verifyToken, getCurrentUser);
+
 
 export default router
