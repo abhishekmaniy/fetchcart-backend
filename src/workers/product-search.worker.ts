@@ -4,6 +4,19 @@ import type { ProductSearchJobData } from "../types/search.types";
 import { runProductSearchJob } from "../services/product-search.service";
 import { publishSearchEvent } from "../events/search-event.publisher";
 import { redisConnection } from "../config/redis";
+import express from "express";
+
+
+const app = express();
+const PORT = process.env.PORT || 5001;
+
+app.get("/", (_, res) => {
+  res.send("Worker is running");
+});
+
+app.listen(PORT, () => {
+  console.log(`Worker health server running on port ${PORT}`);
+});
 
 function getErrorDetails(error: unknown) {
   if (error instanceof Error) {

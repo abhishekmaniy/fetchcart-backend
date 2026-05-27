@@ -3,8 +3,21 @@ import { redisConnection } from "../config/redis";
 import type { ProductCompareJobData } from "../types/compare.types";
 import { runProductCompareJob } from "../services/compare-worker.service";
 import { publishCompareEvent } from "../events/compare-event.publisher";
+import express from "express";
 
 const PRODUCT_COMPARE_QUEUE = "product-compare";
+
+
+const app = express();
+const PORT = process.env.PORT || 5001;
+
+app.get("/", (_, res) => {
+  res.send("Worker is running");
+});
+
+app.listen(PORT, () => {
+  console.log(`Worker health server running on port ${PORT}`);
+});
 
 function getErrorDetails(error: unknown) {
   if (error instanceof Error) {
