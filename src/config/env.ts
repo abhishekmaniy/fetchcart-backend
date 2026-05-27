@@ -27,6 +27,11 @@ const requiredEnvVars = [
   "RAZORPAY_KEY_SECRET",
   "RAZORPAY_WEBHOOK_SECRET",
 
+  "REDIS_HOST",
+  "REDIS_PORT",
+  "REDIS_USERNAME",
+  "REDIS_PASSWORD",
+
   "RESEND_API_KEY",
   "RESEND_FROM_EMAIL",
   "RESEND_FROM_NAME",
@@ -94,4 +99,7 @@ export const env = {
   RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL!,
   RESEND_FROM_NAME: process.env.RESEND_FROM_NAME!,
   RESEND_REPLY_TO: process.env.RESEND_REPLY_TO || "",
+  REDIS_USERNAME: process.env.REDIS_USERNAME || "",
+  REDIS_PASSWORD: process.env.REDIS_PASSWORD || ""
+
 };
