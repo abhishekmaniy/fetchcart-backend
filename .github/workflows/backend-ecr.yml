@@ -1,0 +1,95 @@
+name: Build and Push FetchCart Backend to ECR
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: 20
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    environment: Production
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for CI checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript build check
+        run: npm run build
+
+      # Optional: enable this when your ESLint setup is stable
+      # - name: Run lint
+      #   run: npm run lint
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate AWS/ECR variables
+        run: |
+          test -n "${{ secrets.AWS_REGION }}" || (echo "AWS_REGION is missing" && exit 1)
+          test -n "${{ secrets.ECR_REPOSITORY }}" || (echo "ECR_REPOSITORY is missing" && exit 1)
+          echo "AWS region and ECR repository are configured"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository if it does not exist
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "${{ secrets.ECR_REPOSITORY }}" \
+            --region "${{ secrets.AWS_REGION }}" \
+          || aws ecr create-repository \
+            --repository-name "${{ secrets.ECR_REPOSITORY }}" \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE \
+            --region "${{ secrets.AWS_REGION }}"
+
+      - name: Prepare Docker image metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="main-${SHORT_SHA}"
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "latest_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t "${{ steps.meta.outputs.image_uri }}" \
+            -t "${{ steps.meta.outputs.latest_uri }}" \
+            .
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push "${{ steps.meta.outputs.image_uri }}"
+          docker push "${{ steps.meta.outputs.latest_uri }}"
+
+      - name: Show pushed image
+        run: |
+          echo "Pushed image:"
+          echo "${{ steps.meta.outputs.image_uri }}"

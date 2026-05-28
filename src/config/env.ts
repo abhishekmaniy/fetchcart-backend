@@ -29,8 +29,8 @@ const requiredEnvVars = [
 
   "REDIS_HOST",
   "REDIS_PORT",
-  "REDIS_USERNAME",
-  "REDIS_PASSWORD",
+  // "REDIS_USERNAME",
+  // "REDIS_PASSWORD",
 
   "RESEND_API_KEY",
   "RESEND_FROM_EMAIL",
