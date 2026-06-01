@@ -1,4 +1,4 @@
-name: Build and Push FetchCart Backend to ECR
+name: Build, Push Backend Image, and Update Infra Repo
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
 
 env:
   NODE_VERSION: 20
+  INFRA_OVERLAY_IMAGE_PATCH: apps/fetchcart-backend/overlays/production/patch-image.yaml
 
 jobs:
   build-and-push:
@@ -16,11 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: Production
 
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
     permissions:
       contents: read
 
     steps:
-      - name: Checkout repository
+      - name: Checkout backend repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js for CI checks
@@ -35,7 +40,7 @@ jobs:
       - name: TypeScript build check
         run: npm run build
 
-      # Optional: enable this when your ESLint setup is stable
+      # Enable later when lint is stable
       # - name: Run lint
       #   run: npm run lint
 
@@ -72,10 +77,16 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           IMAGE_TAG="main-${SHORT_SHA}"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          LATEST_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest"
+
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "latest_uri=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "latest_uri=${LATEST_URI}" >> $GITHUB_OUTPUT
+
+          echo "Image tag: ${IMAGE_TAG}"
+          echo "Image URI: ${IMAGE_URI}"
 
       - name: Build Docker image
         run: |
@@ -93,3 +104,70 @@ jobs:
         run: |
           echo "Pushed image:"
           echo "${{ steps.meta.outputs.image_uri }}"
+
+  update-infra:
+    name: Update Kubernetes Overlay Image
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: Production
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate infra repo variables
+        run: |
+          test -n "${{ secrets.INFRA_REPO }}" || (echo "INFRA_REPO is missing" && exit 1)
+          test -n "${{ secrets.INFRA_REPO_PAT }}" || (echo "INFRA_REPO_PAT is missing" && exit 1)
+          echo "Infra repo configuration is present"
+
+      - name: Checkout infra repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.INFRA_REPO }}
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: infra
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Update image in production overlay
+        working-directory: infra
+        env:
+          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
+          IMAGE_PATCH_FILE: ${{ env.INFRA_OVERLAY_IMAGE_PATCH }}
+        run: |
+          test -f "$IMAGE_PATCH_FILE" || (echo "$IMAGE_PATCH_FILE not found" && exit 1)
+
+          yq -i '
+            (.spec.template.spec.containers[] | select(.name == "api").image) = strenv(IMAGE_URI) |
+            (.spec.template.spec.containers[] | select(.name == "search-worker").image) = strenv(IMAGE_URI) |
+            (.spec.template.spec.containers[] | select(.name == "compare-worker").image) = strenv(IMAGE_URI)
+          ' "$IMAGE_PATCH_FILE"
+
+          echo "Updated image patch:"
+          cat "$IMAGE_PATCH_FILE"
+
+      - name: Commit and push infra update
+        working-directory: infra
+        env:
+          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          git config user.name "fetchcart-ci-bot"
+          git config user.email "fetchcart-ci-bot@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "No infra changes detected"
+            exit 0
+          fi
+
+          git add "${{ env.INFRA_OVERLAY_IMAGE_PATCH }}"
+          git commit -m "chore(fetchcart-backend): deploy ${IMAGE_TAG}"
+          git push
+
+          echo "Infra repo updated with image:"
+          echo "${IMAGE_URI}"

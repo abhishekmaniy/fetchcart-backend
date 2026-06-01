@@ -1,0 +1,39 @@
+services:
+  api:
+    image: fetchcart-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fetchcart-api
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env.docker
+    command: ["npm", "start"]
+    restart: unless-stopped
+
+  search-worker:
+    image: fetchcart-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fetchcart-search-worker
+    env_file:
+      - .env.docker
+    command: ["npm", "run", "start:worker:search"]
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  compare-worker:
+    image: fetchcart-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fetchcart-compare-worker
+    env_file:
+      - .env.docker
+    command: ["npm", "run", "start:worker:compare"]
+    restart: unless-stopped
+    depends_on:
+      - api
