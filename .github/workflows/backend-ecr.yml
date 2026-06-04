@@ -138,18 +138,33 @@ jobs:
         working-directory: infra
         env:
           IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
-          IMAGE_PATCH_FILE: ${{ env.INFRA_OVERLAY_IMAGE_PATCH }}
         run: |
-          test -f "$IMAGE_PATCH_FILE" || (echo "$IMAGE_PATCH_FILE not found" && exit 1)
+          yq eval-all -i '
+            (
+              select(.kind == "Deployment" and .metadata.name == "fetchcart-api")
+              .spec.template.spec.containers[]
+              | select(.name == "api").image
+            ) = strenv(IMAGE_URI)
 
-          yq -i '
-            (.spec.template.spec.containers[] | select(.name == "api").image) = strenv(IMAGE_URI) |
-            (.spec.template.spec.containers[] | select(.name == "search-worker").image) = strenv(IMAGE_URI) |
-            (.spec.template.spec.containers[] | select(.name == "compare-worker").image) = strenv(IMAGE_URI)
-          ' "$IMAGE_PATCH_FILE"
+            |
 
-          echo "Updated image patch:"
-          cat "$IMAGE_PATCH_FILE"
+            (
+              select(.kind == "Deployment" and .metadata.name == "fetchcart-search-worker")
+              .spec.template.spec.containers[]
+              | select(.name == "search-worker").image
+            ) = strenv(IMAGE_URI)
+
+            |
+
+            (
+              select(.kind == "Deployment" and .metadata.name == "fetchcart-compare-worker")
+              .spec.template.spec.containers[]
+              | select(.name == "compare-worker").image
+            ) = strenv(IMAGE_URI)
+          ' apps/fetchcart-backend/overlays/production/patch-image.yaml
+
+          echo "Updated patch-image.yaml:"
+          cat apps/fetchcart-backend/overlays/production/patch-image.yaml
 
       - name: Commit and push infra update
         working-directory: infra
