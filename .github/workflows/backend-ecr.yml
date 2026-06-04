@@ -143,36 +143,7 @@ jobs:
           export IMAGE_URI
 
           yq -i '
-            select(.metadata.name == "fetchcart-api")
-            .spec.template.spec.containers[]
-            |= (
-              if .name == "api"
-              then .image = env(IMAGE_URI)
-              else .
-              end
-            )
-          ' apps/fetchcart-backend/overlays/production/patch-image.yaml
-
-          yq -i '
-            select(.metadata.name == "fetchcart-search-worker")
-            .spec.template.spec.containers[]
-            |= (
-              if .name == "search-worker"
-              then .image = env(IMAGE_URI)
-              else .
-              end
-            )
-          ' apps/fetchcart-backend/overlays/production/patch-image.yaml
-
-          yq -i '
-            select(.metadata.name == "fetchcart-compare-worker")
-            .spec.template.spec.containers[]
-            |= (
-              if .name == "compare-worker"
-              then .image = env(IMAGE_URI)
-              else .
-              end
-            )
+            (.spec.template.spec.containers[].image) = env(IMAGE_URI)
           ' apps/fetchcart-backend/overlays/production/patch-image.yaml
 
           echo "Updated patch-image.yaml:"
