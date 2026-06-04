@@ -18,7 +18,6 @@ jobs:
     environment: Production
 
     outputs:
-      image_uri: ${{ steps.meta.outputs.image_uri }}
       image_tag: ${{ steps.meta.outputs.image_tag }}
 
     permissions:
@@ -40,10 +39,6 @@ jobs:
       - name: TypeScript build check
         run: npm run build
 
-      # Enable later when lint is stable
-      # - name: Run lint
-      #   run: npm run lint
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -55,7 +50,6 @@ jobs:
         run: |
           test -n "${{ secrets.AWS_REGION }}" || (echo "AWS_REGION is missing" && exit 1)
           test -n "${{ secrets.ECR_REPOSITORY }}" || (echo "ECR_REPOSITORY is missing" && exit 1)
-          echo "AWS region and ECR repository are configured"
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -77,33 +71,33 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           IMAGE_TAG="main-${SHORT_SHA}"
+
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}"
           LATEST_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest"
 
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "latest_uri=${LATEST_URI}" >> $GITHUB_OUTPUT
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_ENV
+          echo "latest_uri=${LATEST_URI}" >> $GITHUB_ENV
 
-          echo "Image tag: ${IMAGE_TAG}"
-          echo "Image URI: ${IMAGE_URI}"
+          echo "Generated Image URI:"
+          echo "${IMAGE_URI}"
 
       - name: Build Docker image
         run: |
           docker build \
-            -t "${{ steps.meta.outputs.image_uri }}" \
-            -t "${{ steps.meta.outputs.latest_uri }}" \
+            -t "${{ env.image_uri }}" \
+            -t "${{ env.latest_uri }}" \
             .
 
       - name: Push Docker image to ECR
         run: |
-          docker push "${{ steps.meta.outputs.image_uri }}"
-          docker push "${{ steps.meta.outputs.latest_uri }}"
+          docker push "${{ env.image_uri }}"
+          docker push "${{ env.latest_uri }}"
 
       - name: Show pushed image
         run: |
           echo "Pushed image:"
-          echo "${{ steps.meta.outputs.image_uri }}"
+          echo "${{ env.image_uri }}"
 
   update-infra:
     name: Update Kubernetes Overlay Image
@@ -119,7 +113,6 @@ jobs:
         run: |
           test -n "${{ secrets.INFRA_REPO }}" || (echo "INFRA_REPO is missing" && exit 1)
           test -n "${{ secrets.INFRA_REPO_PAT }}" || (echo "INFRA_REPO_PAT is missing" && exit 1)
-          echo "Infra repo configuration is present"
 
       - name: Checkout infra repository
         uses: actions/checkout@v4
@@ -137,8 +130,16 @@ jobs:
       - name: Update image in production overlay
         working-directory: infra
         env:
-          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Using image:"
+          echo "${IMAGE_URI}"
+
           yq eval-all -i '
             (
               select(.kind == "Deployment" and .metadata.name == "fetchcart-api")
@@ -169,7 +170,6 @@ jobs:
       - name: Commit and push infra update
         working-directory: infra
         env:
-          IMAGE_URI: ${{ needs.build-and-push.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
           git config user.name "fetchcart-ci-bot"
@@ -180,9 +180,8 @@ jobs:
             exit 0
           fi
 
-          git add "${{ env.INFRA_OVERLAY_IMAGE_PATCH }}"
-          git commit -m "chore(fetchcart-backend): deploy ${IMAGE_TAG}"
-          git push
+          git add apps/fetchcart-backend/overlays/production/patch-image.yaml
 
-          echo "Infra repo updated with image:"
-          echo "${IMAGE_URI}"
+          git commit -m "chore(fetchcart-backend): deploy ${IMAGE_TAG}"
+
+          git push
