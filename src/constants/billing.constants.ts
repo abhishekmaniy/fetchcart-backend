@@ -9,14 +9,14 @@ export const BILLING_PLANS = {
   PRO: {
     plan: "PRO",
     name: "Pro",
-    priceInPaise: 49900, // ₹499
+    priceInPaise: 9900, // ₹99
     currency: "INR",
   },
 
   MAX: {
     plan: "MAX",
     name: "Max",
-    priceInPaise: 99900, // ₹999
+    priceInPaise: 24900, // ₹249
     currency: "INR",
   },
 } as const;
