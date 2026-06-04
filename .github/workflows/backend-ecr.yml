@@ -140,28 +140,39 @@ jobs:
           echo "Using image:"
           echo "${IMAGE_URI}"
 
-          yq eval-all -i '
-            (
-              select(.kind == "Deployment" and .metadata.name == "fetchcart-api")
-              .spec.template.spec.containers[]
-              | select(.name == "api").image
-            ) = strenv(IMAGE_URI)
+          export IMAGE_URI
 
-            |
+          yq -i '
+            select(.metadata.name == "fetchcart-api")
+            .spec.template.spec.containers[]
+            |= (
+              if .name == "api"
+              then .image = env(IMAGE_URI)
+              else .
+              end
+            )
+          ' apps/fetchcart-backend/overlays/production/patch-image.yaml
 
-            (
-              select(.kind == "Deployment" and .metadata.name == "fetchcart-search-worker")
-              .spec.template.spec.containers[]
-              | select(.name == "search-worker").image
-            ) = strenv(IMAGE_URI)
+          yq -i '
+            select(.metadata.name == "fetchcart-search-worker")
+            .spec.template.spec.containers[]
+            |= (
+              if .name == "search-worker"
+              then .image = env(IMAGE_URI)
+              else .
+              end
+            )
+          ' apps/fetchcart-backend/overlays/production/patch-image.yaml
 
-            |
-
-            (
-              select(.kind == "Deployment" and .metadata.name == "fetchcart-compare-worker")
-              .spec.template.spec.containers[]
-              | select(.name == "compare-worker").image
-            ) = strenv(IMAGE_URI)
+          yq -i '
+            select(.metadata.name == "fetchcart-compare-worker")
+            .spec.template.spec.containers[]
+            |= (
+              if .name == "compare-worker"
+              then .image = env(IMAGE_URI)
+              else .
+              end
+            )
           ' apps/fetchcart-backend/overlays/production/patch-image.yaml
 
           echo "Updated patch-image.yaml:"
